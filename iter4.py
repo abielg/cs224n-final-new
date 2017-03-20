@@ -31,9 +31,7 @@ class Config(object):
 	information parameters. Model objects are passed a Config() object at
 	instantiation.
 
-	CHECK WHICH VALUES WE ACTUALLY NEED AND MODIFY THEM
 	"""
-	dropout = 0.5
 	embed_size = 200
 	encoder_hidden_size = 200
 	decoder_hidden_size = 200
