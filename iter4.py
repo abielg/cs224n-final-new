@@ -1,5 +1,4 @@
 
-
 import tensorflow as tf
 import numpy as np
 import logging
@@ -38,11 +37,11 @@ class Config(object):
 	embed_size = 200
 	encoder_hidden_size = 200
 	decoder_hidden_size = 200
-	batch_size = 50 # batch size was previously 2048
+	batch_size = 50
 	n_epochs = 10
-	lr = 0.001
+	lr = 0.005
 	max_sentence_len = 20
-	vocab_size = 5000
+	vocab_size = 3000
 
 	def __init__(self):
 		self.output_path = "results/{:%Y%m%d_%H%M%S}/".format(datetime.now())
@@ -150,7 +149,8 @@ class RNN(object):
 
 		final_state_fw, final_state_bw = final_state
 
-		h_final = tf.concat([final_state_fw[1], final_state_bw[1]], 1)
+	#	h_final = tf.concat([final_state_fw[1], final_state_bw[1]], 1)
+		h_final = (final_state_fw[1], final_state_bw[1])
 
 		final_state = h_final
 
@@ -187,22 +187,23 @@ class RNN(object):
 			if (i==0): # use if/else for setting variable scope
 
 				lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.decoder_hidden_size, \
-					state_is_tuple=False)
+					state_is_tuple=True)
 				# cur_inputs: [batch_sz=50, embed_sz=200]
 				#cur_state: [batch_sz=50, 2 * dec_hidden_size] NEW: must be concatenation of c and h
 
-				print('cur_state', cur_state)
 				new_h, new_state = lstmCell(cur_inputs, cur_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
 
-				new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size])
+				#new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size]) # for state_is_tuple=False
+				new_c = new_state[0] # for state_is_tuple=True
 
 			else:
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
 					lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.decoder_hidden_size, \
-						state_is_tuple=False)
+						state_is_tuple=True)
 					new_h, new_state = lstmCell(cur_inputs, cur_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
-					new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size])
-
+					#new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size]) # for state_is_tuple=False
+					new_c = new_state[0] # for state_is_tuple=True
+			
 			if (i>0):
 
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
@@ -216,14 +217,15 @@ class RNN(object):
 						num_outputs=self.config.decoder_hidden_size, activation_fn=tf.nn.tanh, trainable=True)  # should be trainable as is
 
 					# output projection
-					W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
-					b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
+		#			W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
+		#			b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
 
 					cur_pred = tf.matmul(cur_h, W_out) + b_out
 					preds.append(cur_pred)
 
 			cur_h = new_h
-			cur_state = tf.concat([new_c, new_h], 1)
+		#	cur_state = tf.concat([new_c, new_h], 1) # for state_is_tuple=False
+			cur_state = (new_c, new_h) # for state_is_tuple=True
 
 		preds_tensor_form = tf.stack(preds, axis=1) # axis = 1 so that max_sentence_len will be second dimension
 
@@ -259,21 +261,20 @@ class RNN(object):
 			if (i==0): # use if/else for setting variable scope
 
 				lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.decoder_hidden_size, \
-					state_is_tuple=False)
+					state_is_tuple=True)
 				# cur_inputs: [batch_sz=50, embed_sz=200]
 				#cur_state: [batch_sz=50, 2 * dec_hidden_size] NEW: must be concatenation of c and h
 
-				print('cur_state', cur_state)
 				new_h, new_state = lstmCell(cur_inputs, cur_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
-
-				new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size])
-
+				#new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size]) # for state_is_tuple=False
+				new_c = new_state[0] # for state_is_tuple=True
 			else:
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
 					lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.decoder_hidden_size, \
-						state_is_tuple=False)
+						state_is_tuple=True)
 					new_h, new_state = lstmCell(cur_inputs, cur_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
-					new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size])
+					#new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size]) # for state_is_tuple=False
+					new_c = new_state[0] # for state_is_tuple=True
 
 			if (i > 0):
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
@@ -297,7 +298,8 @@ class RNN(object):
 					preds.append(cur_pred)
 
 			cur_h = new_h
-			cur_state = tf.concat([new_c, new_h], 1)
+		#	cur_state = tf.concat([new_c, new_h], 1) # for state_is_tuple=False
+			cur_state = (new_c, new_h) # for state_is_tuple=True
 
 		preds_tensor_form = tf.stack(preds, axis=1) # axis = 1 so that max_sentence_len will be second dimension
 
@@ -399,26 +401,21 @@ class RNN(object):
 		else:
 			preds, loss = sess.run([self.test_pred, self.test_loss], feed)
 
-		if (self.save_predictions == True):
-			if num_of_batch % 40 == 0:
-				self.save_outputs(sess, preds, inputs_batch, labels_batch, num_preds=1)
+	#	if (self.save_predictions == True): # temporarily commented this out and shifted below code left
+		if num_of_batch == 1:
+	# 	if num_of_batch % 40 == 0: #TEMP REMOVE
+			self.save_outputs(sess, preds, inputs_batch, labels_batch, num_preds=3)
 
 		return loss
 
 	def save_outputs(self, sess, preds, inputs, titles, num_preds=-1): # shape of each input: [batch_size x max_sentence_length]
-		preds = tf.stack(preds, axis=1) # new shape: [batch_size, max_sentence_length, vocab_size]
+
+	#	preds = tf.stack(preds, axis=1) # new shape: [batch_size, max_sentence_length, vocab_size]
 		preds = tf.argmax(preds, axis=2) # new shape: [batch_size, max_sentence_length]
-
-	#	inputs = self.encoder_inputs_placeholder # shape: [max_sentence_len, batch_size]
-	#	inputs = tf.unstack(inputs, axis=0) 
-		inputs = tf.transpose(inputs) # new shape: [batch_size, max_sentence_len]
-
-		titles = tf.transpose(titles)
 
 		inputs_list = tf.unstack(inputs, num=self.config.batch_size) # batch_size elems, each a tensor: [max_sentence_len]
 		titles_list = tf.unstack(titles, num=self.config.batch_size)
 		preds_list =tf.unstack(preds, num=self.config.batch_size)
-
 
 		with gfile.GFile(self.config.preds_output, mode="a") as output_file:
 			logger.info("Storing predictions in " + self.config.preds_output)
@@ -471,7 +468,7 @@ class RNN(object):
 		dev_input_batches, dev_truth_batches, dev_mask_batches, dev_input_sequence = dev_data
 
 		logger.info("number of train input batches: %d", int(len(train_input_batches)))
-		prog = Progbar(target=1 + len(train_input_batches))
+		prog = Progbar(target=len(train_input_batches))
 
 		loss = 0
 		for i, input_batch in enumerate(train_input_batches):
@@ -534,7 +531,7 @@ class RNN(object):
 		dev_input_sequence = get_reg_minibatches(dev_input_len, self.config.batch_size)
 
 		for epoch in range(self.config.n_epochs):
-			if epoch == self.config.n_epochs - 2:
+			if epoch == 0:
 				self.save_predictions = True
 			else:
 				self.save_predictions = False
@@ -605,8 +602,6 @@ def tokenize_data(path, max_sentence_len, do_mask):
 	f = open('data/summarization/' + path,'r')
 	for line in f.readlines():
 		sentence = [int(x) for x in line.split()]
-		if path[-5:] == 'title':
-			sentence.insert(0,SOS_ID)
 		if len(sentence) > max_sentence_len:
 			sentence = sentence[:max_sentence_len]
 		sequence_length.append(len(sentence))
