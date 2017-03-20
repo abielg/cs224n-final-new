@@ -37,12 +37,12 @@ class Config(object):
 	dropout = 0.5
 	embed_size = 200 # temporarily changed from 100
 	encoder_hidden_size = 200
-	decoder_hidden_size = encoder_hidden_size * 2
+	decoder_hidden_size = encoder_hidden_size
 	batch_size = 50 # batch size was previously 2048
 	n_epochs = 10
 	lr = 0.001
 	max_sentence_len = 20
-	vocab_size = 1000
+	vocab_size = 10000
 
 	def __init__(self):
 		self.output_path = "results/{:%Y%m%d_%H%M%S}/".format(datetime.now())
@@ -94,11 +94,33 @@ class RNN(object):
 
 
 	def add_embedding(self, placeholder):
-		"""Adds an embedding layer that maps from input tokens (integers) to vectors
+		"""Adds an embedding layer that maps from input tokens (integers) to vectors and then
+		concatenates those vectors:
+
+			- Create an embedding tensor and initialize it with self.pretrained_embeddings.
+			- Use the input_placeholder to index into the embeddings tensor, resulting in a
+			  tensor of shape (None, max_length, n_features, embed_size).
+			- Concatenates the embeddings by reshaping the embeddings tensor to shape
+			  (None, max_length, n_features * embed_size).
+
+		Returns:
+			embeddings: tf.Tensor of shape (None, max_length, embed_size)
 		"""
+		### YOUR CODE HERE (~4-6 lines)
 		embedding_tensor = tf.Variable(self.embedding_matrix)
 		lookup_tensor = tf.nn.embedding_lookup(embedding_tensor, placeholder)
+		#embeddings = tf.reshape(lookup_tensor, [-1, self.config.max_sentence_len, self.config.embed_size])
+		### END YOUR CODE
 		return lookup_tensor
+
+	# Handles a single batch, returns the outputs
+	def add_pred_single_batch_train(self):
+		with tf.variable_scope(tf.get_variable_scope()):
+			input_sequence_lengths = self.sequence_placeholder
+			encoder_outputs, final_enc_state = self.encode() # TODO: gather sequence lengths
+			preds = self.decode_train(encoder_outputs, final_enc_state)
+
+		return preds # [batch_size, max_sentence_len, vocab_size]
 
 	def encode(self):
 
@@ -109,22 +131,33 @@ class RNN(object):
 		input_sequence_lengths = self.sequence_placeholder # [batch_size] tensor of the lengths of each input sentence in the batch
 		x = self.add_embedding(self.encoder_inputs_placeholder) # [batch_sz, max_sentence_len, embed_sz]
 
+	#	fw_cell2 = tf.nn.rnn_cell.LSTMCell(num_units=.5 * self.config.encoder_hidden_size, initializer=tf.contrib.layers.xavier_initializer())
+	#	bckwd_cell2 = tf.nn.rnn_cell.LSTMCell(num_units=.5 * self.config.encoder_hidden_size, initializer=tf.contrib.layers.xavier_initializer())
+
 		fw_cell = tf.contrib.rnn.LSTMCell(self.config.encoder_hidden_size, initializer=tf.contrib.layers.xavier_initializer())
 		bckwd_cell = tf.contrib.rnn.LSTMCell(self.config.encoder_hidden_size, initializer=tf.contrib.layers.xavier_initializer())
 
 		outputs, final_state = tf.nn.bidirectional_dynamic_rnn(cell_fw=fw_cell, cell_bw=bckwd_cell, \
 			inputs=x, sequence_length=input_sequence_lengths, dtype=tf.float64)
 
+	#	outputs_fw, outputs_bw = outputs
+	#	outputs_fw = tf.cast(outputs_fw, tf.float32)
+	#	outputs_bw = tf.cast(outputs_bw, tf.float32)
+
 		concat_outputs = tf.concat(outputs, 2) # dimension: [batch_size x max_sentence_length x encoder_hidden_size]		
+		print('outputs',outputs)
+		print('concat_outputs',concat_outputs)
 		final_state_fw, final_state_bw = final_state
 
-		#c_final = tf.concat([final_state_fw[0], final_state_bw[0]], 1)
+		c_final = tf.concat([final_state_fw[0], final_state_bw[0]], 1)
 		h_final = tf.concat([final_state_fw[1], final_state_bw[1]], 1)
 
+		#final_state = (c_final, h_final)
 		final_state = h_final
 
 		return concat_outputs, final_state # concat_outputs -> attention_values, sequence_length -> attention_values_length
 		# concat_outputs: [batch_size, max_sentence_len, output_size (encoder_hidden_size)]
+
 
 	def decode_train(self, attention_values, decoder_start_state):
 
@@ -146,35 +179,50 @@ class RNN(object):
 				cur_inputs = tf.squeeze(cur_inputs)
 			intermediate_hidden_state = None
 			if (i==0): # state_is_tuple is true for first cell bc end of encoder function outputs final state in weird ass format
-				lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.encoder_hidden_size, \
-					initializer=tf.contrib.layers.xavier_initializer(), state_is_tuple=False)
+			#	lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.encoder_hidden_size, \
+			#		initializer=tf.contrib.layers.xavier_initializer(), state_is_tuple=False)
+				print('cur_inputs', cur_inputs)
+				print('cur_hidden_state',cur_hidden_state)
+				lstmCell = tf.contrib.rnn.BasicLSTMCell(num_units=self.config.encoder_hidden_size, \
+					state_is_tuple=False)
 				new_h, new_state = lstmCell(cur_inputs, cur_hidden_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
 				intermediate_hidden_state = new_state #tf.concat([new_h, new_state], 1)
+				print('i ===== 0')
+				print('new_h', new_h)
+				print('new_state', new_state)
+				print('intermediate_hidden_state', intermediate_hidden_state)
+
 			else:
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
-					lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.encoder_hidden_size, \
-						initializer=tf.contrib.layers.xavier_initializer(), state_is_tuple=False)
+					lstmCell = tf.contrib.rnn.BasicLSTMCell(num_units=self.config.encoder_hidden_size, \
+						state_is_tuple=False)
 					new_h, new_state = lstmCell(cur_inputs, cur_hidden_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
 					intermediate_hidden_state = new_state #tf.concat([new_h, new_state], 1)
 			if (i==0):
 				# layer_inputs = intermediate_hidden_state
 				next_hidden_state = intermediate_hidden_state
-				W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
+				W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[2 * self.config.encoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
 				b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
 			else:
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
+
+					print('intermediate_hidden_state', intermediate_hidden_state)
+					print('attention_values', attention_values)
 					attn_scores, context_vector = self.attention_function_simple(intermediate_hidden_state, attention_values, self.sequence_placeholder)
 					
 					layer_inputs = tf.concat([intermediate_hidden_state, context_vector], 1) # size: [batch_size, 2 * decoder_hidden_size]
 					next_hidden_state = tf.contrib.layers.fully_connected(inputs=layer_inputs, \
-						num_outputs=2 * self.config.encoder_hidden_size, activation_fn=tf.nn.tanh, trainable=True)  # should be trainable as is				
-					W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
+						num_outputs=2 * self.config.encoder_hidden_size, activation_fn=tf.nn.tanh, trainable=True)  # should be trainable as is
+					print('i !!!!==== 0')
+					print('next_hidden_state', next_hidden_state)
+					W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[2 * self.config.encoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
 					b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
 
 					cur_pred = tf.matmul(cur_hidden_state, W_out) + b_out
 					preds.append(cur_pred)
 
 			cur_hidden_state = next_hidden_state
+			print("made it through first iteration of for loop")
 
 		preds_tensor_form = tf.stack(preds, axis=1) # axis = 1 so that max_sentence_len will be second dimension
 
@@ -187,6 +235,9 @@ class RNN(object):
 
 	#	W = tf.get_variable(shape=[self.encoder_hidden_size, self.decoder_hidden_size], initializer=tf.contrib.layers.xavier_initializer()) # manually set scope?
 
+	#	first_dot = tf.matmul(attention_values, W) # [batch_size, max_sentence_len, 2 * encoder_hidden_size]
+	#	print("shape of first dot: ")
+	#	print(first_dot.get_shape)
 
 		# global attention. using bilinear formula: ht dot W dot cell_output
 		raw_scores = tf.reduce_sum(attention_values * tf.expand_dims(cell_output, 1), [2]) # [batch_sz, max_sentence_len]
@@ -201,20 +252,10 @@ class RNN(object):
 		return (prob_distribution, context_vector)
 
 
-		# Handles a single batch, returns the outputs
-	def add_pred_single_batch_train(self):
-		with tf.variable_scope(tf.get_variable_scope()):
-			encoder_outputs, final_enc_state = self.encode() # TODO: gather sequence lengths
-			preds = self.decode_train(encoder_outputs, final_enc_state)
-
-		return preds # [batch_size, max_sentence_len, vocab_size]
-
 	# Handles a single batch, returns the outputs
-	def add_pred_single_batch_test(self):
-		with tf.variable_scope(tf.get_variable_scope()):
-			encoder_outputs, final_enc_state = self.encode() # TODO: gather sequence lengths
-			preds = self.decode_train(encoder_outputs, final_enc_state)
-		return preds
+	def add_pred_single_batch_test(self, W, b):
+		# TODO: 
+		return
 
 	# assumes we already have padding implemented.
 
@@ -437,8 +478,8 @@ class RNN(object):
 		self.train_loss = self.add_loss_op(self.train_pred)
 		self.train_op = self.add_training_op(self.train_loss)
 
-		self.dev_pred = self.add_pred_single_batch_test()
-		self.dev_loss = self.add_loss_op(self.dev_pred, W, b)
+		#self.dev_pred = self.add_pred_single_batch_test(W, b)
+		#self.dev_loss = self.add_loss_op(self.dev_pred, W, b)
 
 		#self.test_pred = self.add_pred_single_batch_test(W, b)
 		#self.test_loss = self.add_loss_op(self.test_pred, W, b)
@@ -472,6 +513,8 @@ def tokenize_data(path, max_sentence_len, do_mask):
 	f = open('data/summarization/' + path,'r')
 	for line in f.readlines():
 		sentence = [int(x) for x in line.split()]
+		if path[-5:] == 'title':
+			sentence.insert(0,SOS_ID)
 		if len(sentence) > max_sentence_len:
 			sentence = sentence[:max_sentence_len]
 		sequence_length.append(len(sentence))
