@@ -37,7 +37,7 @@ class Config(object):
 	dropout = 0.5
 	embed_size = 200 # temporarily changed from 100
 	encoder_hidden_size = 200
-	decoder_hidden_size = encoder_hidden_size
+	decoder_hidden_size = 400
 	batch_size = 50 # batch size was previously 2048
 	n_epochs = 10
 	lr = 0.001
@@ -118,7 +118,7 @@ class RNN(object):
 		with tf.variable_scope(tf.get_variable_scope()):
 			input_sequence_lengths = self.sequence_placeholder
 			encoder_outputs, final_enc_state = self.encode() # TODO: gather sequence lengths
-			preds = self.decode_train(encoder_outputs, final_enc_state)
+			preds = self.decode_train2(encoder_outputs, final_enc_state)
 
 		return preds # [batch_size, max_sentence_len, vocab_size]
 
@@ -131,8 +131,6 @@ class RNN(object):
 		input_sequence_lengths = self.sequence_placeholder # [batch_size] tensor of the lengths of each input sentence in the batch
 		x = self.add_embedding(self.encoder_inputs_placeholder) # [batch_sz, max_sentence_len, embed_sz]
 
-	#	fw_cell2 = tf.nn.rnn_cell.LSTMCell(num_units=.5 * self.config.encoder_hidden_size, initializer=tf.contrib.layers.xavier_initializer())
-	#	bckwd_cell2 = tf.nn.rnn_cell.LSTMCell(num_units=.5 * self.config.encoder_hidden_size, initializer=tf.contrib.layers.xavier_initializer())
 
 		fw_cell = tf.contrib.rnn.LSTMCell(self.config.encoder_hidden_size, initializer=tf.contrib.layers.xavier_initializer())
 		bckwd_cell = tf.contrib.rnn.LSTMCell(self.config.encoder_hidden_size, initializer=tf.contrib.layers.xavier_initializer())
@@ -144,7 +142,7 @@ class RNN(object):
 	#	outputs_fw = tf.cast(outputs_fw, tf.float32)
 	#	outputs_bw = tf.cast(outputs_bw, tf.float32)
 
-		concat_outputs = tf.concat(outputs, 2) # dimension: [batch_size x max_sentence_length x encoder_hidden_size]		
+		concat_outputs = tf.concat(outputs, 2) # dimension: [batch_size x max_sentence_length x 2 * encoder_hidden_size]		
 		print('outputs',outputs)
 		print('concat_outputs',concat_outputs)
 		final_state_fw, final_state_bw = final_state
@@ -156,8 +154,77 @@ class RNN(object):
 		final_state = h_final
 
 		return concat_outputs, final_state # concat_outputs -> attention_values, sequence_length -> attention_values_length
-		# concat_outputs: [batch_size, max_sentence_len, output_size (encoder_hidden_size)]
+		# concat_outputs: [batch_size, max_sentence_len, output_size (2 * encoder_hidden_size)]
 
+
+	def decode_train2(self, attention_values, decoder_start_state):
+		input_embeddings = self.add_embedding(self.labels_placeholder) # truth embeddings. [batch_size x max_sentence_length x embed_size]
+
+		preds = [] # currently saved as a list, where each elem represents one timestep. TODO: reshape to tensor, where max_sentence_len is second dimension
+
+		cur_state = decoder_start_state   # shape: [batch_size, decoder_hidden_size]
+		cur_h = None # save cur_h only so that we can make prediction at end of function
+		start_symbol_tensor = tf.constant(value=SOS_ID, dtype=tf.int32, shape=[self.config.batch_size])
+		cur_inputs = self.add_embedding(start_symbol_tensor)
+
+		for i in xrange(self.config.max_sentence_len + 1): # max_sequence_length iterations + 1 (+1 for start symbol). starts at 0
+
+			if (i > 0): 
+				# cur_hidden_state initialized previously at end of for loop
+				cur_inputs = tf.slice(input_embeddings, [0, i-1, 0], [-1, 1, -1]) # desired shape: [batch_size, embed_size]. unsure whether or not this will work (might return as numpy array?)
+				cur_inputs = tf.squeeze(cur_inputs)
+
+			new_h = None
+			new_c = None
+
+			if (i==0): # use if/else for setting variable scope
+
+				lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.decoder_hidden_size, \
+					state_is_tuple=False)
+				# cur_inputs: [batch_sz=50, embed_sz=200]
+				#cur_state: [batch_sz=50, 2 * dec_hidden_size] NEW: must be concatenation of c and h
+
+				print('cur_state', cur_state)
+				new_h, new_state = lstmCell(cur_inputs, cur_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
+				# new_state: [batch_size, 2 * decoder_hidden_size]
+				# desired shape of new_h: [batch_sz=50, dec_hidden_size]
+				new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size])
+
+			else:
+				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
+					lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.decoder_hidden_size, \
+						state_is_tuple=False)
+					new_h, new_state = lstmCell(cur_inputs, cur_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
+					new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size])
+
+			if (i==0):
+
+				W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
+				b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
+
+			else:
+				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
+					# get context vector
+					attn_scores, context_vector = self.attention_function_simple(new_h, attention_values, self.sequence_placeholder)
+					
+					# linear transformation + tanh nonlinearity
+					layer_inputs = tf.concat([new_h, context_vector], 1) # size: [batch_size, 2 * decoder_hidden_size]
+					new_h = tf.contrib.layers.fully_connected(inputs=layer_inputs, \
+						num_outputs=self.config.decoder_hidden_size, activation_fn=tf.nn.tanh, trainable=True)  # should be trainable as is
+
+					# output projection
+					W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
+					b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
+
+					cur_pred = tf.matmul(cur_h, W_out) + b_out
+					preds.append(cur_pred)
+
+			cur_h = new_h
+			cur_state = tf.concat([new_c, new_h], 1)
+
+		preds_tensor_form = tf.stack(preds, axis=1) # axis = 1 so that max_sentence_len will be second dimension
+
+		return preds_tensor_form
 
 	def decode_train(self, attention_values, decoder_start_state):
 
@@ -171,8 +238,9 @@ class RNN(object):
 
 			if (i==0): 
 				cur_hidden_state = decoder_start_state   # shape: [batch_size, decoder_hidden_size]
+				print("decoder_start_state (first hidden state)", decoder_start_state)
 				start_symbol_tensor = tf.constant(value=SOS_ID, dtype=tf.int32, shape=[self.config.batch_size])
-				cur_inputs = self.add_embedding(start_symbol_tensor) # TODO: fairly unsure whether or not this will work. will just try
+				cur_inputs = self.add_embedding(start_symbol_tensor)
 			else:
 				# cur_hidden_state initialized previously at end of for loop
 				cur_inputs = tf.slice(input_embeddings, [0, i-1, 0], [-1, 1, -1]) # desired shape: [batch_size, embed_size]. unsure whether or not this will work (might return as numpy array?)
@@ -181,40 +249,43 @@ class RNN(object):
 			if (i==0): # state_is_tuple is true for first cell bc end of encoder function outputs final state in weird ass format
 			#	lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.encoder_hidden_size, \
 			#		initializer=tf.contrib.layers.xavier_initializer(), state_is_tuple=False)
-				print('cur_inputs', cur_inputs)
-				print('cur_hidden_state',cur_hidden_state)
-				lstmCell = tf.contrib.rnn.BasicLSTMCell(num_units=self.config.encoder_hidden_size, \
-					state_is_tuple=False)
+
+				# worked when we used encoder_hidden_size, saved new_state, and had decoder_hidden_size = 200
+			#	lstmCell = tf.contrib.rnn.BasicLSTMCell(num_units=self.config.decoder_hidden_size, \ 
+			#		state_is_tuple=False)
+
+
+				lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.decoder_hidden_size, \
+					state_is_tuple=False) # do we need output projection?
+				# cur_inputs: [batch_sz=50, embed_sz=200]
+				#cur_hidden_state: [batch_sz=50, dec_hidden_size=400] NEW: must be concatenation of c and h
+
 				new_h, new_state = lstmCell(cur_inputs, cur_hidden_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
-				intermediate_hidden_state = new_state #tf.concat([new_h, new_state], 1)
-				print('i ===== 0')
-				print('new_h', new_h)
-				print('new_state', new_state)
-				print('intermediate_hidden_state', intermediate_hidden_state)
+				# desired shape of new_h: [batch_sz=50, dec_hidden_size]
+
+				intermediate_hidden_state = new_h
 
 			else:
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
-					lstmCell = tf.contrib.rnn.BasicLSTMCell(num_units=self.config.encoder_hidden_size, \
+					lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.decoder_hidden_size, \
 						state_is_tuple=False)
 					new_h, new_state = lstmCell(cur_inputs, cur_hidden_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
-					intermediate_hidden_state = new_state #tf.concat([new_h, new_state], 1)
+					intermediate_hidden_state = new_h
+
 			if (i==0):
 				# layer_inputs = intermediate_hidden_state
 				next_hidden_state = intermediate_hidden_state
-				W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[2 * self.config.encoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
+				W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
 				b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
 			else:
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
 
-					print('intermediate_hidden_state', intermediate_hidden_state)
-					print('attention_values', attention_values)
 					attn_scores, context_vector = self.attention_function_simple(intermediate_hidden_state, attention_values, self.sequence_placeholder)
 					
 					layer_inputs = tf.concat([intermediate_hidden_state, context_vector], 1) # size: [batch_size, 2 * decoder_hidden_size]
 					next_hidden_state = tf.contrib.layers.fully_connected(inputs=layer_inputs, \
-						num_outputs=2 * self.config.encoder_hidden_size, activation_fn=tf.nn.tanh, trainable=True)  # should be trainable as is
-					print('i !!!!==== 0')
-					print('next_hidden_state', next_hidden_state)
+						num_outputs=self.config.decoder_hidden_size, activation_fn=tf.nn.tanh, trainable=True)  # should be trainable as is
+
 					W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[2 * self.config.encoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
 					b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
 
@@ -222,11 +293,29 @@ class RNN(object):
 					preds.append(cur_pred)
 
 			cur_hidden_state = next_hidden_state
-			print("made it through first iteration of for loop")
+
 
 		preds_tensor_form = tf.stack(preds, axis=1) # axis = 1 so that max_sentence_len will be second dimension
 
 		return preds_tensor_form # TODO: EOS token? or output one pad token -> fill the rest with pad?
+
+	def bilinear_attention_function(self, cell_output, attention_values, sequence_length, W):
+		# W: [encoder_hidden_size, decoder_hidden_size]
+		'''
+		a: batch_size
+		b: max_sentence_len
+		c: encoder_hidden_size
+		d: decoder_hidden_size
+		'''
+
+		W = tf.expand_dims(W, 0)
+		W = tf.expand_dims(W, 0) # W: [1, 1, encoder_hidden_size, decoder_hidden_size]
+
+		W = tf.tile(W, [self.config.batch_size, self.config.max_sentence_len, 1, 1,]) # W: [batch_size, max_sentence_len, encoder_hidden_size, decoder_hidden_size]
+		
+
+
+		att_vals_by_W = tf.einsum('abc,')
 
 	def attention_function_simple(self, cell_output, attention_values, sequence_length): # h{enc_i} dot h{s} ... h{s} represents previous hidden state of decoder
 
@@ -241,6 +330,7 @@ class RNN(object):
 
 		# global attention. using bilinear formula: ht dot W dot cell_output
 		raw_scores = tf.reduce_sum(attention_values * tf.expand_dims(cell_output, 1), [2]) # [batch_sz, max_sentence_len]
+
 		scores_mask = tf.sequence_mask(lengths=tf.to_int32(sequence_length), maxlen=self.config.max_sentence_len, dtype=tf.float64)
 		attn_scores = raw_scores * scores_mask + ((1.0 - scores_mask) * tf.float64.min) # unsure what exactly this does ... seems to be a typecast
 		prob_distribution = tf.nn.softmax(attn_scores) # [batch_sz, max_sentence_len]
