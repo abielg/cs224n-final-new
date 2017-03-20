@@ -35,14 +35,14 @@ class Config(object):
 	CHECK WHICH VALUES WE ACTUALLY NEED AND MODIFY THEM
 	"""
 	dropout = 0.5
-	embed_size = 200 # temporarily changed from 100
+	embed_size = 200
 	encoder_hidden_size = 200
-	decoder_hidden_size = 400
+	decoder_hidden_size = 200
 	batch_size = 50 # batch size was previously 2048
 	n_epochs = 10
 	lr = 0.001
 	max_sentence_len = 20
-	vocab_size = 10000
+	vocab_size = 5000
 
 	def __init__(self):
 		self.output_path = "results/{:%Y%m%d_%H%M%S}/".format(datetime.now())
@@ -158,6 +158,12 @@ class RNN(object):
 
 
 	def decode_train2(self, attention_values, decoder_start_state):
+
+		# initialize variables
+		W_attn = tf.get_variable("W_attn", dtype=tf.float64, shape=[2 * self.config.encoder_hidden_size, self.config.decoder_hidden_size], initializer=tf.contrib.layers.xavier_initializer())
+		W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
+		b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
+
 		input_embeddings = self.add_embedding(self.labels_placeholder) # truth embeddings. [batch_size x max_sentence_length x embed_size]
 
 		preds = [] # currently saved as a list, where each elem represents one timestep. TODO: reshape to tensor, where max_sentence_len is second dimension
@@ -197,16 +203,12 @@ class RNN(object):
 					new_h, new_state = lstmCell(cur_inputs, cur_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
 					new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size])
 
-			if (i==0):
-
-				W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
-				b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
-
-			else:
+			if (i>0):
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
 					# get context vector
-					attn_scores, context_vector = self.attention_function_simple(new_h, attention_values, self.sequence_placeholder)
-					
+				#	attn_scores, context_vector = self.attention_function_simple(new_h, attention_values, self.sequence_placeholder)
+					attn_scores, context_vector = self.bilinear_attention_function(new_h, attention_values, self.sequence_placeholder, W_attn)
+
 					# linear transformation + tanh nonlinearity
 					layer_inputs = tf.concat([new_h, context_vector], 1) # size: [batch_size, 2 * decoder_hidden_size]
 					new_h = tf.contrib.layers.fully_connected(inputs=layer_inputs, \
@@ -226,7 +228,7 @@ class RNN(object):
 
 		return preds_tensor_form
 
-	def decode_train(self, attention_values, decoder_start_state):
+	def decode_train(self, attention_values, decoder_start_state, W_attn):
 
 		input_embeddings = self.add_embedding(self.labels_placeholder) # truth embeddings. [batch_size x max_sentence_length x embed_size]
 
@@ -280,8 +282,10 @@ class RNN(object):
 			else:
 				with tf.variable_scope(tf.get_variable_scope(), reuse=True):
 
-					attn_scores, context_vector = self.attention_function_simple(intermediate_hidden_state, attention_values, self.sequence_placeholder)
-					
+				#	attn_scores, context_vector = self.attention_function_simple(intermediate_hidden_state, attention_values, self.sequence_placeholder)
+					attn_scores, context_vector = self.bilinear_attention_function(intermediate_hidden_state, attention_values, self.sequence_placeholder, W_attn)
+
+
 					layer_inputs = tf.concat([intermediate_hidden_state, context_vector], 1) # size: [batch_size, 2 * decoder_hidden_size]
 					next_hidden_state = tf.contrib.layers.fully_connected(inputs=layer_inputs, \
 						num_outputs=self.config.decoder_hidden_size, activation_fn=tf.nn.tanh, trainable=True)  # should be trainable as is
@@ -299,23 +303,31 @@ class RNN(object):
 
 		return preds_tensor_form # TODO: EOS token? or output one pad token -> fill the rest with pad?
 
-	def bilinear_attention_function(self, cell_output, attention_values, sequence_length, W):
-		# W: [encoder_hidden_size, decoder_hidden_size]
+	def bilinear_attention_function(self, cell_output, attention_values, sequence_length, W_attn):
+		# W: [2 * encoder_hidden_size, decoder_hidden_size]
 		'''
 		a: batch_size
 		b: max_sentence_len
 		c: encoder_hidden_size
 		d: decoder_hidden_size
 		'''
+		cell_output = tf.expand_dims(cell_output, 1)
+		cell_output = tf.tile(cell_output, [1, self.config.max_sentence_len, 1])
+		W_tiled = tf.expand_dims(W_attn, 0)
+		W_tiled = tf.expand_dims(W_tiled, 0) # W: [1, 1, 2 * encoder_hidden_size, decoder_hidden_size]
+		W_tiled = tf.tile(W_tiled, [self.config.batch_size, self.config.max_sentence_len, 1, 1]) # W: [batch_size, max_sentence_len, 2 * encoder_hidden_size, decoder_hidden_size]
+		att_vals_by_W = tf.einsum('abc,abcd->abd', attention_values, W_tiled)
+		raw_scores = tf.einsum('abd,abd->ab', att_vals_by_W, cell_output) # scores: [batch_size, max_sentence_len]
 
-		W = tf.expand_dims(W, 0)
-		W = tf.expand_dims(W, 0) # W: [1, 1, encoder_hidden_size, decoder_hidden_size]
+		# process scores
+		scores_mask = tf.sequence_mask(lengths=tf.to_int32(sequence_length), maxlen=self.config.max_sentence_len, dtype=tf.float64)
+		attn_scores = raw_scores * scores_mask + ((1.0 - scores_mask) * tf.float64.min) # unsure what exactly this does ... seems to be a typecast
+		prob_distribution = tf.nn.softmax(attn_scores) # [batch_sz, max_sentence_len]
+		context_vector = tf.expand_dims(prob_distribution, 2) * attention_values # multiplies each hidden encoder vector by its attention score
+		# context_vectors shape: [batch_sz, max_sentence_len, dec_hidden_size]
+		context_vector = tf.reduce_sum(context_vector, 1) # reduced over max_sentence_len dimension bc we're using global attention
 
-		W = tf.tile(W, [self.config.batch_size, self.config.max_sentence_len, 1, 1,]) # W: [batch_size, max_sentence_len, encoder_hidden_size, decoder_hidden_size]
-		
-
-
-		att_vals_by_W = tf.einsum('abc,')
+		return(prob_distribution, context_vector)
 
 	def attention_function_simple(self, cell_output, attention_values, sequence_length): # h{enc_i} dot h{s} ... h{s} represents previous hidden state of decoder
 
