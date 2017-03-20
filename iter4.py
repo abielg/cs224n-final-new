@@ -234,12 +234,7 @@ class RNN(object):
 
 	def decode_test(self, attention_values, decoder_start_state, W_out, b_out, W_attn):
 
-		# initialize variables
-	#	W_attn = tf.get_variable("W_attn", dtype=tf.float64, shape=[2 * self.config.encoder_hidden_size, self.config.decoder_hidden_size], initializer=tf.contrib.layers.xavier_initializer())
-	#	W_out = tf.get_variable("W_out", dtype=tf.float64, shape=[self.config.decoder_hidden_size, self.config.vocab_size], initializer=tf.contrib.layers.xavier_initializer())
-	#	b_out = tf.get_variable("b_out", dtype=tf.float64, shape=[self.config.vocab_size], initializer=tf.constant_initializer(0.0))
-
-		preds = [] # currently saved as a list, where each elem represents one timestep. TODO: reshape to tensor, where max_sentence_len is second dimension
+		preds = [] # currently saved as a list, where each elem represents one timestep
 
 		cur_state = decoder_start_state   # shape: [batch_size, decoder_hidden_size]
 		cur_h = None # save cur_h only so that we can make prediction at end of function
@@ -247,13 +242,6 @@ class RNN(object):
 		cur_inputs = self.add_embedding(start_symbol_tensor) # [batch_sz, embed_sz]
 
 		for i in xrange(self.config.max_sentence_len + 1): # max_sequence_length iterations + 1 (+1 for start symbol). starts at 0
-
-			'''
-			if (i > 0): 
-				# cur_hidden_state initialized previously at end of for loop
-				cur_inputs = tf.slice(input_embeddings, [0, i-1, 0], [-1, 1, -1]) # desired shape: [batch_size, embed_size]. unsure whether or not this will work (might return as numpy array?)
-				cur_inputs = tf.squeeze(cur_inputs) # NO LONGER NEED TRUTH VALUES. GATHER CUR_INPUTS FROM PREDICTIONS
-			'''
 
 			new_h = None
 			new_c = None
@@ -263,7 +251,6 @@ class RNN(object):
 				lstmCell = tf.contrib.rnn.LSTMCell(num_units=self.config.decoder_hidden_size, \
 					state_is_tuple=True)
 				# cur_inputs: [batch_sz=50, embed_sz=200]
-				#cur_state: [batch_sz=50, 2 * dec_hidden_size] NEW: must be concatenation of c and h
 
 				new_h, new_state = lstmCell(cur_inputs, cur_state) # LSTM output has shape: [batch_size, decoder_hidden_size]
 				#new_c = tf.slice(new_state, begin=[0, 0], size=[-1, self.config.decoder_hidden_size]) # for state_is_tuple=False
@@ -352,7 +339,6 @@ class RNN(object):
 
 
 	# assumes we already have padding implemented.
-
 	def add_loss_op(self, preds, print_pred=False):
 
 		"""
